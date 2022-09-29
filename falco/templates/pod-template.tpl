@@ -55,30 +55,50 @@ spec:
       securityContext:
         {{- include "falco.securityContext" . | nindent 8 }}
       args:
-        - /usr/bin/falco
-        {{- with .Values.collectors }}
-        {{- if .enabled }}
-        {{- if .containerd.enabled }}
-        - --cri
-        - /run/containerd/containerd.sock
-        {{- end }}
-        {{- if .crio.enabled }}
-        - --cri
-        - /run/crio/crio.sock
-        {{- end }}
-        {{- if .kubernetes.enabled }}
-        - -K
-        - {{ .kubernetes.apiAuth }}
-        - -k
-        - {{ .kubernetes.apiUrl }}
-        {{- if .kubernetes.enableNodeFilter }}
-        - --k8s-node
-        - "$(FALCO_K8S_NODE_NAME)"
-        {{- end }}
-        {{- end }}
-        - -pk
-        {{- end }}
-        {{- end }}
+        - /bin/bash
+        - -c
+        - |
+          set -euo pipefail
+          flags=()
+          # Check if gVisor is configured on the node.
+          if [[ -f /host/run/containerd/runsc/config.toml ]]; then
+            echo Configuring Falco+gVisor integration.
+            /usr/bin/falco --gvisor-generate-config=/run/containerd/runsc/falco.sock > /host/run/containerd/runsc/pod-init.json
+            if [[ -z $(grep pod-init-config /host/run/containerd/runsc/config.toml) ]]; then
+              echo '  pod-init-config = "/run/containerd/runsc/pod-init.json"' >> /host/run/containerd/runsc/config.toml
+            fi
+
+            # Endpoint inside the container is different from outside, add
+            # "/host" to the endpoint path inside the container.
+            sed 's/"endpoint" : "\/run/"endpoint" : "\/host\/run/' /host/run/containerd/runsc/pod-init.json > /tmp/pod-init.json
+            flags=(--gvisor-config /tmp/pod-init.json --gvisor-root /host/run/containerd/runsc/k8s.io)
+            PATH=${PATH}:/host/home/containerd/usr/local/sbin
+          fi
+          /usr/bin/falco
+          {{- with .Values.collectors }}
+          {{- if .enabled }}
+          {{- if .containerd.enabled }}
+          - --cri
+          - /run/containerd/containerd.sock
+          {{- end }}
+          {{- if .crio.enabled }}
+          - --cri
+          - /run/crio/crio.sock
+          {{- end }}
+          {{- if .kubernetes.enabled }}
+          - -K
+          - {{ .kubernetes.apiAuth }}
+          - -k
+          - {{ .kubernetes.apiUrl }}
+          {{- if .kubernetes.enableNodeFilter }}
+          - --k8s-node
+          - "$(FALCO_K8S_NODE_NAME)"
+          {{- end }}
+          {{- end }}
+          - -pk
+          {{- end }}
+          {{- end }}
+          "${flags[@]}"
     {{- with .Values.extra.args }}
       {{- toYaml . | nindent 8 }}
     {{- end }}
@@ -243,6 +263,12 @@ spec:
       hostPath:
         path: /proc
     {{- end }}
+    - name: runsc-config
+      hostPath:
+        path: /run/containerd/runsc
+    - name: containerd-home
+      hostPath:
+        path: /home/containerd
     - name: config-volume
       configMap:
         name: {{ include "falco.fullname" . }}
